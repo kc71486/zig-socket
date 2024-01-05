@@ -18,7 +18,7 @@ pub fn main() !void {
     var buf: [255]u8 = undefined;
     var fixbuf_stream = std.io.fixedBufferStream(&buf);
     while (true) {
-        try in.streamUntilDelimiter(fixbuf_stream.writer(), '\n', buf.len);
+        try in.streamUntilDelimiter(fixbuf_stream.writer(), '\n', buf.len); //blocking
         var written = fixbuf_stream.getWritten();
         if (written.len > 0) {
             if (std.mem.eql(u8, buf[0..written.len], "q")) {
@@ -32,7 +32,7 @@ pub fn main() !void {
 pub fn hostServer(server: *net.StreamServer) !void {
     defer server.deinit();
     while (true) {
-        var conn = try server.accept();
+        var conn = try server.accept(); //blocking
         _ = try std.Thread.spawn(.{}, service, .{conn});
     }
 }
@@ -41,7 +41,8 @@ pub fn service(conn: connection) !void {
     defer conn.stream.close();
 
     var tetris = try game.Tetris.init();
-    var grid = tetris.grid;
+    _ = tetris;
+    var message = "200";
 
-    _ = try conn.stream.write(&grid);
+    _ = try conn.stream.write(message);
 }
