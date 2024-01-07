@@ -1,9 +1,14 @@
 const std = @import("std");
 const ts = @import("game.zig");
 const expect = std.testing.expect;
+const GPA = std.heap.GeneralPurposeAllocator(.{});
+
+var gpa = GPA{};
+var alloc = gpa.allocator();
 
 test "collision" {
-    var tetris = try ts.Tetris.init();
+    var tetris = try ts.Tetris.init(alloc);
+    defer tetris.deinit();
     try expect(tetris.grid[15][5] == ts.Cell.empty);
     tetris.grid[0][0] = ts.Cell.I;
     tetris.grid[1][1] = ts.Cell.J;
@@ -24,7 +29,8 @@ test "offset" {
 }
 
 test "move" {
-    var tetris = try ts.Tetris.init();
+    var tetris = try ts.Tetris.create(alloc);
+    defer tetris.destroy();
     var cur = &tetris.current;
     cur.position = .{ .x = 5, .y = 5 };
     var moved: bool = undefined;
@@ -42,9 +48,29 @@ test "move" {
     try expect(tetris.current.direction == .zero);
 }
 
+test "rotate" {
+    var tetris = try ts.Tetris.create(alloc);
+    defer tetris.destroy();
+    var cur = &tetris.current;
+    cur.shape = .T;
+    cur.direction = .zero;
+    cur.position = .{ .x = 5, .y = 5 };
+    tetris.grid[4][5] = .I;
+    var moved: bool = undefined;
+    var result: bool = undefined;
+    result = tetris.collisionCheck(tetris.getCurrentBlocks());
+    try expect(result == true);
+    moved = tetris.rotateRight();
+    try expect(moved == true);
+    try expect(cur.position.x == 4);
+    try expect(cur.position.y == 5);
+    result = tetris.collisionCheck(tetris.getCurrentBlocks());
+    try expect(result == true);
+}
+
 test "loadstore" {
-    var tetris1 = try ts.Tetris.init();
-    var tetris2 = try ts.Tetris.init();
+    var tetris1 = try ts.Tetris.init(alloc);
+    var tetris2 = try ts.Tetris.init(alloc);
     var buf: [1000]u8 = [1]u8{0} ** 1000;
     var src = &tetris1;
     var dst = &tetris2;

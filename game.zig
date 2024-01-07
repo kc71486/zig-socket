@@ -1,48 +1,56 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const Prng = std.rand.DefaultPrng;
+const Prng = std.rand.Xoroshiro128;
+const Allocator = std.mem.Allocator;
 
-pub const TetrisState = struct {
-    const This = @This();
-    const GRIDHEIGHT = 30;
-    const GRIDWIDTH = 10;
-    grid: [GRIDHEIGHT][GRIDWIDTH]Cell = [_][GRIDWIDTH]Cell{[_]Cell{.empty} ** 10} ** 30,
-    current: Piece,
-    hold: Shape,
-    queue: Shape,
-    prev_drop_time: i64,
-};
-
-const Buffer = error{
-    BufferSize,
-};
+pub const GRIDHEIGHT = 30;
+pub const GRIDWIDTH = 10;
 
 pub const Tetris = struct {
     const This = @This();
-    const GRIDHEIGHT = 30;
-    const GRIDWIDTH = 10;
     const NS_PER_SEC = 1_000_000_000;
     grid: [GRIDHEIGHT][GRIDWIDTH]Cell = [_][GRIDWIDTH]Cell{[_]Cell{.empty} ** 10} ** 30,
     current: Piece,
     hold: Shape,
     queue: Shape,
     prev_drop_time: i64,
+    alloc: Allocator,
+    prng: *Prng,
     random: std.rand.Random,
-    pub fn init() !This {
+    pub fn init(alloc: Allocator) !This {
         var seed: u64 = undefined;
         try std.os.getrandom(std.mem.asBytes(&seed));
-        var prng = Prng.init(seed);
-        var rand = prng.random();
+        var prng: *Prng = try alloc.create(Prng);
+        prng.seed(seed);
+        var rand: std.rand.Random = prng.random();
+
         return This{
-            .current = .{ .shape = rand.enumValue(Shape), .direction = .zero, .position = .{ .x = 4, .y = 22 } },
+            .current = .{
+                .shape = rand.enumValue(Shape),
+                .direction = .zero,
+                .position = .{ .x = 4, .y = 22 },
+            },
             .hold = rand.enumValue(Shape),
             .queue = rand.enumValue(Shape),
             .prev_drop_time = std.time.microTimestamp(),
+            .alloc = alloc,
+            .prng = prng,
             .random = rand,
         };
     }
     pub fn deinit(this: *This) void {
-        _ = this;
+        this.alloc.destroy(this.prng);
+    }
+    pub fn create(alloc: Allocator) !*This {
+        var mold: This = try This.init(alloc);
+        var ret: *This = try alloc.create(This);
+        ret.* = mold;
+        return ret;
+    }
+    pub fn destroy(this: *This) void {
+        var alloc = this.alloc;
+        alloc.destroy(this.prng);
+        alloc.destroy(this);
     }
     pub fn store(this: *This, bytes: []u8) Buffer!void {
         const size: usize = @sizeOf(TetrisState);
@@ -103,7 +111,7 @@ pub const Tetris = struct {
         }
         return canmove;
     }
-    pub fn moveDown(this: *This) bool {
+    pub fn moveDown(this: *This, manual: bool) bool {
         var current: *Piece = &this.current;
         const blocks = getBlockOffset(current.shape, current.direction);
         const motion = CoordI{ .x = 0, .y = -1 };
@@ -111,14 +119,17 @@ pub const Tetris = struct {
         const canmove = this.collisionCheck(moved);
         if (canmove) {
             current.position.y -= 1;
-            this.prev_drop_time = std.time.microTimestamp();
+            this.prev_drop_time = if (manual)
+                std.time.microTimestamp()
+            else
+                this.prev_drop_time + 1_000_000_000;
         }
         return canmove;
     }
     pub fn rotateRight(this: *This) bool {
         var current: *Piece = &this.current;
-        const blocks = getBlockOffset(current.shape, current.direction);
-        current.direction = current.direction.rotateRight();
+        const new_direction = current.direction.rotateRight();
+        const blocks = getBlockOffset(current.shape, new_direction);
         for (0..5) |i| {
             const idx: u32 = @intCast(i);
             const kick_rot_right = 0;
@@ -128,16 +139,16 @@ pub const Tetris = struct {
             if (canmove) {
                 current.position.x = addOffset(current.position.x, motion.x);
                 current.position.y = addOffset(current.position.y, motion.y);
+                current.direction = new_direction;
                 return true;
             }
         }
-        current.direction = current.direction.rotateLeft();
         return false;
     }
     pub fn rotateLeft(this: *This) bool {
         var current: *Piece = &this.current;
-        const blocks = getBlockOffset(current.shape, current.direction);
-        current.direction = current.direction.rotateLeft();
+        const new_direction = current.direction.rotateLeft();
+        const blocks = getBlockOffset(current.shape, new_direction);
         for (0..5) |i| {
             const idx: u32 = @intCast(i);
             const kick_rot_left = 1;
@@ -147,11 +158,87 @@ pub const Tetris = struct {
             if (canmove) {
                 current.position.x = addOffset(current.position.x, motion.x);
                 current.position.y = addOffset(current.position.y, motion.y);
+                current.direction = new_direction;
                 return true;
             }
         }
-        current.direction = current.direction.rotateRight();
         return false;
+    }
+    pub fn getCurrentBlocks(this: *This) [4]CoordI {
+        const cur: *Piece = &this.current;
+        const offsets = getBlockOffset(cur.shape, cur.direction);
+        return getMoved(cur.position, offsets, .{ .x = 0, .y = 0 });
+    }
+};
+
+const Buffer = error{
+    BufferSize,
+};
+
+pub const TetrisState = struct {
+    const This = @This();
+    grid: [GRIDHEIGHT][GRIDWIDTH]Cell = [_][GRIDWIDTH]Cell{[_]Cell{.empty} ** 10} ** 30,
+    current: Piece,
+    hold: Shape,
+    queue: Shape,
+    prev_drop_time: i64,
+};
+
+pub const CoordU = struct {
+    const This = @This();
+    x: usize,
+    y: usize,
+    pub fn inBound(this: This, boundx: usize, boundy: usize) bool {
+        return this.x < boundx and this.y < boundy;
+    }
+    pub fn toCoordI(this: This) CoordI {
+        return .{ .x = @intCast(this.x), .y = @intCast(this.y) };
+    }
+};
+
+pub const CoordI = struct {
+    const This = @This();
+    x: isize,
+    y: isize,
+    pub fn inBound(this: This, boundx: isize, boundy: isize) bool {
+        return this.x >= 0 and this.y >= 0 and this.x < boundx and this.y < boundy;
+    }
+    pub fn toCoordU(this: This) CoordU {
+        return .{ .x = @intCast(this.x), .y = @intCast(this.y) };
+    }
+};
+
+pub const Cell = enum(u8) { empty, I, J, L, O, S, Z, T };
+
+pub const Piece = struct {
+    shape: Shape,
+    direction: Direction,
+    position: CoordU,
+};
+
+pub const Shape = enum(u8) { I, J, L, O, S, Z, T };
+
+pub const Direction = enum(u8) {
+    const This = @This();
+    zero,
+    right,
+    two,
+    left,
+    pub fn rotateRight(this: This) This {
+        switch (this) {
+            .zero => return .right,
+            .right => return .two,
+            .two => return .left,
+            .left => return .zero,
+        }
+    }
+    pub fn rotateLeft(this: This) This {
+        switch (this) {
+            .zero => return .left,
+            .right => return .zero,
+            .two => return .right,
+            .left => return .two,
+        }
     }
 };
 
@@ -398,36 +485,37 @@ fn getKick(shape: Shape, direction: Direction, rot: u32, index: u32) CoordI {
     }
     std.debug.assert(index < 5);
     std.debug.assert(rot == (rot & 1));
+    // rot = 0: right, 1: left
     switch (shape) {
         .J, .L, .S, .T, .Z => {
             switch (direction) {
                 .zero => {
-                    return kickData_JLSTZ[0 ^ rot][index];
+                    return kickData_JLSTZ[0 ^ rot][index - 1];
                 },
                 .right => {
-                    return kickData_JLSTZ[1 ^ rot][index];
+                    return kickData_JLSTZ[1 ^ rot][index - 1];
                 },
                 .two => {
-                    return kickData_JLSTZ[2 ^ rot][index];
+                    return kickData_JLSTZ[2 ^ rot][index - 1];
                 },
                 .left => {
-                    return kickData_JLSTZ[3 ^ rot][index];
+                    return kickData_JLSTZ[3 ^ rot][index - 1];
                 },
             }
         },
         .I => {
             switch (direction) {
                 .zero => {
-                    return kickData_I[0 ^ rot][index];
+                    return kickData_I[0 ^ rot][index - 1];
                 },
                 .right => {
-                    return kickData_I[2 ^ rot][index];
+                    return kickData_I[2 ^ rot][index - 1];
                 },
                 .two => {
-                    return kickData_I[1 ^ rot][index];
+                    return kickData_I[1 ^ rot][index - 1];
                 },
                 .left => {
-                    return kickData_I[3 ^ rot][index];
+                    return kickData_I[3 ^ rot][index - 1];
                 },
             }
         },
@@ -449,64 +537,6 @@ fn getMoved(base: CoordU, offset: [4]CoordI, motion: CoordI) [4]CoordI {
 
 fn addOffset(a: usize, b: isize) usize {
     const ia: isize = @intCast(a);
-    std.debug.assert(ia > b);
+    std.debug.assert(ia + b >= 0);
     return @intCast(ia + b);
 }
-
-pub const CoordU = struct {
-    const This = @This();
-    x: usize,
-    y: usize,
-    pub fn inBound(this: This, boundx: usize, boundy: usize) bool {
-        return this.x < boundx and this.y < boundy;
-    }
-    pub fn toCoordI(this: This) CoordI {
-        return .{ .x = @intCast(this.x), .y = @intCast(this.y) };
-    }
-};
-
-pub const CoordI = struct {
-    const This = @This();
-    x: isize,
-    y: isize,
-    pub fn inBound(this: This, boundx: isize, boundy: isize) bool {
-        return this.x >= 0 and this.y >= 0 and this.x < boundx and this.y < boundy;
-    }
-    pub fn toCoordU(this: This) CoordU {
-        return .{ .x = @intCast(this.x), .y = @intCast(this.y) };
-    }
-};
-
-pub const Cell = enum(u8) { empty, I, J, L, O, S, Z, T };
-
-pub const Piece = struct {
-    shape: Shape,
-    direction: Direction,
-    position: CoordU,
-};
-
-pub const Shape = enum(u8) { I, J, L, O, S, Z, T };
-
-pub const Direction = enum(u8) {
-    const This = @This();
-    zero,
-    right,
-    two,
-    left,
-    pub fn rotateRight(this: This) This {
-        switch (this) {
-            .zero => return .right,
-            .right => return .two,
-            .two => return .left,
-            .left => return .zero,
-        }
-    }
-    pub fn rotateLeft(this: This) This {
-        switch (this) {
-            .zero => return .left,
-            .right => return .zero,
-            .two => return .right,
-            .left => return .two,
-        }
-    }
-};
