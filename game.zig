@@ -5,46 +5,45 @@ const Allocator = std.mem.Allocator;
 
 pub const GRIDHEIGHT = 30;
 pub const GRIDWIDTH = 10;
+pub const DISPLAYHEIGHT = 20;
+pub const DISPLAYWIDTH = 10;
+pub const DROP_INTERVAL = 1_000_000;
 
 pub const Tetris = struct {
     const This = @This();
-    const NS_PER_SEC = 1_000_000_000;
     grid: [GRIDHEIGHT][GRIDWIDTH]Cell = [_][GRIDWIDTH]Cell{[_]Cell{.empty} ** 10} ** 30,
-    current: Piece,
-    hold: Shape,
-    queue: Shape,
-    prev_drop_time: i64,
+    current: Piece = .{
+        .shape = .I,
+        .direction = .zero,
+        .position = .{ .x = 4, .y = 21 },
+    },
+    hold: Shape = Shape.I,
+    queue: Shape = Shape.I,
+    prev_drop_time: i64 = 0,
+    end: bool = false,
     alloc: Allocator,
     prng: *Prng,
     random: std.rand.Random,
     pub fn init(alloc: Allocator) !This {
-        var seed: u64 = undefined;
-        try std.os.getrandom(std.mem.asBytes(&seed));
         var prng: *Prng = try alloc.create(Prng);
-        prng.seed(seed);
-        var rand: std.rand.Random = prng.random();
 
         return This{
-            .current = .{
-                .shape = rand.enumValue(Shape),
-                .direction = .zero,
-                .position = .{ .x = 4, .y = 22 },
-            },
-            .hold = rand.enumValue(Shape),
-            .queue = rand.enumValue(Shape),
-            .prev_drop_time = std.time.microTimestamp(),
             .alloc = alloc,
             .prng = prng,
-            .random = rand,
+            .random = prng.random(),
         };
     }
     pub fn deinit(this: *This) void {
         this.alloc.destroy(this.prng);
     }
     pub fn create(alloc: Allocator) !*This {
-        var mold: This = try This.init(alloc);
         var ret: *This = try alloc.create(This);
-        ret.* = mold;
+        var prng: *Prng = try alloc.create(Prng);
+        ret.* = .{
+            .alloc = alloc,
+            .prng = prng,
+            .random = prng.random(),
+        };
         return ret;
     }
     pub fn destroy(this: *This) void {
@@ -52,42 +51,30 @@ pub const Tetris = struct {
         alloc.destroy(this.prng);
         alloc.destroy(this);
     }
-    pub fn store(this: *This, bytes: []u8) Buffer!void {
-        const size: usize = @sizeOf(TetrisState);
-        if (bytes.len < size) {
-            return Buffer.BufferSize;
-        }
-        var state: *TetrisState = @ptrCast(@alignCast(bytes[0..size]));
+    pub fn setSeed(this: *This, seed: u64) void {
+        this.prng.seed(seed);
+        this.current.shape = this.random.enumValue(Shape);
+        this.hold = this.random.enumValue(Shape);
+        this.queue = this.random.enumValue(Shape);
+    }
+    pub fn start(this: *This) void {
+        this.grid = [_][GRIDWIDTH]Cell{[_]Cell{.empty} ** 10} ** 30;
+        this.prev_drop_time = std.time.microTimestamp();
+        this.end = false;
+    }
+    pub fn store(this: *This, state: *TetrisState) void {
         state.grid = this.grid;
         state.current = this.current;
         state.hold = this.hold;
         state.queue = this.queue;
         state.prev_drop_time = this.prev_drop_time;
     }
-    pub fn load(this: *This, bytes: []u8) Buffer!void {
-        const size: usize = @sizeOf(TetrisState);
-        if (bytes.len < size) {
-            return Buffer.BufferSize;
-        }
-        var state: *TetrisState = @ptrCast(@alignCast(bytes[0..size]));
+    pub fn load(this: *This, state: *const TetrisState) void {
         this.grid = state.grid;
         this.current = state.current;
         this.hold = state.hold;
         this.queue = state.queue;
         this.prev_drop_time = state.prev_drop_time;
-    }
-    pub fn collisionCheck(this: *This, blocks: [4]CoordI) bool {
-        for (blocks) |block| {
-            if (!block.inBound(GRIDWIDTH, GRIDHEIGHT)) {
-                return false;
-            }
-            const block_u = block.toCoordU();
-            switch (this.grid[block_u.y][block_u.x]) {
-                .I, .J, .L, .O, .S, .Z, .T => return false,
-                .empty => {},
-            }
-        }
-        return true;
     }
     pub fn moveRight(this: *This) bool {
         var current: *Piece = &this.current;
@@ -111,7 +98,7 @@ pub const Tetris = struct {
         }
         return canmove;
     }
-    pub fn moveDown(this: *This, manual: bool) bool {
+    pub fn moveDown(this: *This) bool {
         var current: *Piece = &this.current;
         const blocks = getBlockOffset(current.shape, current.direction);
         const motion = CoordI{ .x = 0, .y = -1 };
@@ -119,10 +106,7 @@ pub const Tetris = struct {
         const canmove = this.collisionCheck(moved);
         if (canmove) {
             current.position.y -= 1;
-            this.prev_drop_time = if (manual)
-                std.time.microTimestamp()
-            else
-                this.prev_drop_time + 1_000_000_000;
+            this.prev_drop_time = std.time.microTimestamp();
         }
         return canmove;
     }
@@ -164,24 +148,137 @@ pub const Tetris = struct {
         }
         return false;
     }
+    pub fn immDrop(this: *This) void {
+        const tp = this.getPredictedBlocks();
+        if (tp.dropamt == 0 and this.willEnd()) {
+            this.end = true;
+            return;
+        }
+        this.current.position.y -= tp.dropamt;
+        this.solidify();
+    }
+    pub fn autoDrop(this: *This) void {
+        var current: *Piece = &this.current;
+        std.debug.print("{}\n", .{current});
+        const blocks = getBlockOffset(current.shape, current.direction);
+        const motion = CoordI{ .x = 0, .y = -1 };
+        const moved: [4]CoordI = getMoved(current.position, blocks, motion);
+        const canmove = this.collisionCheck(moved);
+        if (canmove) {
+            current.position.y -= 1;
+            this.prev_drop_time = this.prev_drop_time + DROP_INTERVAL;
+        } else {
+            this.solidify();
+        }
+    }
+    fn solidify(this: *This) void {
+        const cb = this.getCurrentBlocks();
+        std.debug.assert(this.collisionCheck(cb));
+        const cell = this.current.shape.toCell();
+        for (cb) |block| {
+            const bx: usize = @intCast(block.x);
+            const by: usize = @intCast(block.y);
+            this.grid[by][bx] = cell;
+        }
+        var iy: usize = DISPLAYHEIGHT - 1;
+        while (iy < GRIDHEIGHT) : (iy -%= 1) {
+            var blockcount: u32 = 0;
+            for (0..DISPLAYWIDTH) |ix| {
+                if (this.grid[iy][ix] != .empty) {
+                    blockcount += 1;
+                }
+            }
+            if (blockcount == DISPLAYWIDTH) {
+                for (iy..DISPLAYHEIGHT) |cy| {
+                    std.mem.copyForwards(Cell, &this.grid[cy], &this.grid[cy + 1]);
+                }
+            }
+        }
+        if (this.willEnd()) {
+            this.end = true;
+            return;
+        }
+        this.queue = this.random.enumValue(Shape);
+        this.current = .{
+            .shape = this.queue,
+            .direction = .zero,
+            .position = .{ .x = 4, .y = 21 },
+        };
+    }
+    pub fn collisionCheck(this: *This, blocks: [4]CoordI) bool {
+        for (blocks) |block| {
+            if (!block.inBound(GRIDWIDTH, GRIDHEIGHT)) {
+                return false;
+            }
+            const block_u = block.toCoordU();
+            switch (this.grid[block_u.y][block_u.x]) {
+                .I, .J, .L, .O, .S, .Z, .T => return false,
+                .empty => {},
+            }
+        }
+        return true;
+    }
+    pub fn willEnd(this: *This) bool {
+        const blocks = this.getCurrentBlocks();
+        for (blocks) |block| {
+            if (!block.inBound(DISPLAYWIDTH, DISPLAYHEIGHT)) {
+                return true;
+            }
+        }
+        return false;
+    }
     pub fn getCurrentBlocks(this: *This) [4]CoordI {
         const cur: *Piece = &this.current;
-        const offsets = getBlockOffset(cur.shape, cur.direction);
-        return getMoved(cur.position, offsets, .{ .x = 0, .y = 0 });
+        const offset = getBlockOffset(cur.shape, cur.direction);
+        var moved: [4]CoordI = undefined;
+        const bx: isize = @intCast(cur.position.x);
+        const by: isize = @intCast(cur.position.y);
+        for (offset, 1..) |a, i| {
+            moved[i - 1] = .{ .x = a.x + bx, .y = a.y + by };
+        }
+        return moved;
+    }
+    pub fn getPredictedBlocks(this: *This) PredictedRet {
+        var predicted: [4]CoordI = this.getCurrentBlocks();
+        for (0..(GRIDHEIGHT * 2)) |amt| {
+            for (predicted, 0..) |_, i| {
+                predicted[i].y -= 1;
+            }
+            const canmove = this.collisionCheck(predicted);
+            if (!canmove) {
+                for (predicted, 0..) |_, i| {
+                    predicted[i].y += 1;
+                }
+                return .{
+                    .dropamt = amt,
+                    .blocks = predicted,
+                };
+            }
+        }
+        unreachable;
     }
 };
 
-const Buffer = error{
+pub const PredictedRet = struct {
+    dropamt: usize,
+    blocks: [4]CoordI,
+};
+
+const BufferError = error{
     BufferSize,
 };
 
 pub const TetrisState = struct {
     const This = @This();
     grid: [GRIDHEIGHT][GRIDWIDTH]Cell = [_][GRIDWIDTH]Cell{[_]Cell{.empty} ** 10} ** 30,
-    current: Piece,
-    hold: Shape,
-    queue: Shape,
-    prev_drop_time: i64,
+    current: Piece = .{
+        .shape = .I,
+        .direction = .zero,
+        .position = .{ .x = 0, .y = 0 },
+    },
+    hold: Shape = .I,
+    queue: Shape = .I,
+    prev_drop_time: i64 = 0,
 };
 
 pub const CoordU = struct {
@@ -208,7 +305,16 @@ pub const CoordI = struct {
     }
 };
 
-pub const Cell = enum(u8) { empty, I, J, L, O, S, Z, T };
+pub const Cell = enum(u8) {
+    empty = 0,
+    I = 1,
+    J = 2,
+    L = 3,
+    O = 4,
+    S = 5,
+    Z = 6,
+    T = 7,
+};
 
 pub const Piece = struct {
     shape: Shape,
@@ -216,14 +322,26 @@ pub const Piece = struct {
     position: CoordU,
 };
 
-pub const Shape = enum(u8) { I, J, L, O, S, Z, T };
+pub const Shape = enum(u8) {
+    const This = @This();
+    I = 1,
+    J = 2,
+    L = 3,
+    O = 4,
+    S = 5,
+    Z = 6,
+    T = 7,
+    pub fn toCell(this: This) Cell {
+        return @enumFromInt(@intFromEnum(this));
+    }
+};
 
 pub const Direction = enum(u8) {
     const This = @This();
-    zero,
-    right,
-    two,
-    left,
+    zero = 0,
+    right = 1,
+    two = 2,
+    left = 3,
     pub fn rotateRight(this: This) This {
         switch (this) {
             .zero => return .right,
@@ -248,15 +366,15 @@ const Offset_I = [4][4]CoordI{ [4]CoordI{
     .{ .x = 1, .y = 0 },
     .{ .x = 2, .y = 0 },
 }, [4]CoordI{
-    .{ .x = 1, .y = -2 },
-    .{ .x = 1, .y = -1 },
-    .{ .x = 1, .y = 0 },
-    .{ .x = 1, .y = 1 },
-}, [4]CoordI{
-    .{ .x = -1, .y = -1 },
+    .{ .x = 0, .y = -2 },
     .{ .x = 0, .y = -1 },
-    .{ .x = 1, .y = -1 },
-    .{ .x = 2, .y = -1 },
+    .{ .x = 0, .y = 0 },
+    .{ .x = 0, .y = 1 },
+}, [4]CoordI{
+    .{ .x = -1, .y = 0 },
+    .{ .x = 0, .y = 0 },
+    .{ .x = 1, .y = 0 },
+    .{ .x = 2, .y = 0 },
 }, [4]CoordI{
     .{ .x = 0, .y = -2 },
     .{ .x = 0, .y = -1 },
