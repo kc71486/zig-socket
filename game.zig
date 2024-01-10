@@ -197,12 +197,12 @@ pub const Tetris = struct {
             this.end = true;
             return;
         }
-        this.queue = this.random.enumValue(Shape);
         this.current = .{
             .shape = this.queue,
             .direction = .zero,
             .position = .{ .x = 4, .y = 21 },
         };
+        this.queue = this.random.enumValue(Shape);
     }
     pub fn collisionCheck(this: *This, blocks: [4]CoordI) bool {
         for (blocks) |block| {

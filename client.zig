@@ -315,6 +315,7 @@ fn game_play() void {
         tetris.autoDrop();
     }
     if (tetris.end) {
+    	tetris_m.unlock();
         return;
     }
     tetris_m.unlock();
@@ -376,6 +377,27 @@ fn out_play(out_buf: *Buffer) !void {
         }
         try out_buf.write(compfmt("\x1b[A\x1b[{}G", .{GX}));
     }
+    const next_blocks: [4]game.CoordI = game.getBlockOffset(tetris.queue, .zero);
+    const shaded = getQueueShaded(&next_blocks);
+    try out_buf.write(compfmt("\x1b[{};{}H", .{GY - 15, GX - 11}));
+    for (0..4) |row| {
+        for (0..4) |col| {
+            if (shaded[row][col] == 0) {
+                try out_buf.write("  ");
+            } else {
+                switch (tetris.queue) {
+                    .I => try out_buf.write("\x1b[36m██"),
+                    .J => try out_buf.write("\x1b[31m██"),
+                    .L => try out_buf.write("\x1b[34m██"),
+                    .O => try out_buf.write("\x1b[33m██"),
+                    .S => try out_buf.write("\x1b[32m██"),
+                    .Z => try out_buf.write("\x1b[37m██"),
+                    .T => try out_buf.write("\x1b[35m██"),
+                }
+            }
+        }
+        try out_buf.write(compfmt("\x1b[A\x1b[{}G", .{GX - 11}));
+    }
     tetris_m.unlock();
     rtetris_m.lock();
     try out_buf.write(compfmt("\x1b[A\x1b[{};{}H", .{ OY, OX }));
@@ -419,6 +441,16 @@ fn out_play(out_buf: *Buffer) !void {
     rtetris_m.unlock();
     try out_buf.write("\x1b[39m");
     try out_buf.print();
+}
+
+fn getQueueShaded(coords: *const [4]game.CoordI) [4][4]u8 {
+    var ret = [1][4]u8{[4]u8{0, 0, 0, 0}} ** 4;
+    for (coords) |coord| {
+        var cx: usize = @intCast(coord.x + 1);
+        var cy: usize = @intCast(coord.y + 2);
+        ret[cx][cy] = 1;
+    }
+    return ret;
 }
 
 fn out_result(out_buf: *Buffer) !void {
