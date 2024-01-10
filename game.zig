@@ -159,7 +159,6 @@ pub const Tetris = struct {
     }
     pub fn autoDrop(this: *This) void {
         var current: *Piece = &this.current;
-        std.debug.print("{}\n", .{current});
         const blocks = getBlockOffset(current.shape, current.direction);
         const motion = CoordI{ .x = 0, .y = -1 };
         const moved: [4]CoordI = getMoved(current.position, blocks, motion);
@@ -173,7 +172,7 @@ pub const Tetris = struct {
     }
     fn solidify(this: *This) void {
         const cb = this.getCurrentBlocks();
-        std.debug.assert(this.collisionCheck(cb));
+        assert(this.collisionCheck(cb));
         const cell = this.current.shape.toCell();
         for (cb) |block| {
             const bx: usize = @intCast(block.x);
@@ -601,8 +600,8 @@ fn getKick(shape: Shape, direction: Direction, rot: u32, index: u32) CoordI {
     if (index == 0) {
         return .{ .x = 0, .y = 0 };
     }
-    std.debug.assert(index < 5);
-    std.debug.assert(rot == (rot & 1));
+    assert(index < 5);
+    assert(rot == (rot & 1));
     // rot = 0: right, 1: left
     switch (shape) {
         .J, .L, .S, .T, .Z => {
