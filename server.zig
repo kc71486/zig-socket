@@ -78,7 +78,7 @@ pub fn main() !void {
     try std.os.getrandom(std.mem.asBytes(&seed));
     prng.seed(seed);
 
-    try server.listen(try net.Address.parseIp("140.116.72.41", 7911));
+    try server.listen(try net.Address.parseIp("0.0.0.0", 7911));
     server.reuse_address = true;
     try out.print("listening on {}\n", .{server.listen_address});
 

@@ -155,7 +155,7 @@ fn display() !void {
 }
 
 fn connectServer() !void {
-    var stream = try net.tcpConnectToHost(alloc, "140.116.72.41", 7911);
+    var stream = try net.tcpConnectToHost(alloc, "0.0.0.0", 7911);
     defer stream.close();
 
     var rtetris: *Tetris = try Tetris.create(alloc);
@@ -243,7 +243,6 @@ fn conn_play(stream: *net.Stream, cli_obj: *ClientObject, ser_obj: *ServerObject
     if (rsize == 0) return;
     switch (ser_obj.payload) {
         .tetris => |state| {
-            std.debug.print("{}\n", .{state.grid[10][5]});
             rtetris_m.lock();
             rtetris_opt.?.load(&state);
             rtetris_m.unlock();
